@@ -37,13 +37,17 @@ def merge_documents(*groups):
 
 def deduplicate(documents):
     documents = merge_documents(documents)
-    seen, result = set(), []
+    seen, seen_families, result = set(), set(), []
     for doc in documents:
+        if doc.family_id and doc.family_id in seen_families:
+            continue
         body = re.sub(r"\s+", "", "\n".join(s.text for s in doc.segments))
         key = text_hash(body)
         if key not in seen:
             result.append(doc)
             seen.add(key)
+            if doc.family_id:
+                seen_families.add(doc.family_id)
     return result
 
 

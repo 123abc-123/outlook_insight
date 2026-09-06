@@ -6,9 +6,9 @@ from dataclasses import dataclass
 
 from .errors import RadarError
 from .evidence import check_added_numbers, digest, overlap, text_hash, validate_ref
-from .schemas import (AppendMarkdownBlock, ChangeAssessment, Delta, MarkdownBlock,
+from .schemas import (AppendMarkdownBlock, AppendMarkdownSection, ChangeAssessment, Delta, MarkdownBlock,
                       MarkdownChange, MarkdownDependencyReview, MarkdownOperation,
-                      MarkdownPlan, ReviseMarkdownBlock, unique)
+                      MarkdownPlan, RenameMarkdownSection, ReviseMarkdownBlock, unique)
 
 SUMMARY_PATTERN = re.compile(r"摘要|结论|建议|管理层|决策|执行概要|核心判断")
 HEADING_PATTERN = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
@@ -72,6 +72,15 @@ def is_summary(block):
     return block.kind == "body" and any(SUMMARY_PATTERN.search(section) for section in block.section_path)
 
 
+def is_sensitive_change(change):
+    """领导摘要、核心判断、建议和章节结构必须展示完整候选报告后再提交。"""
+    return (
+        change.change_type in {"dependency", "append_section", "rename_section"}
+        or any(SUMMARY_PATTERN.search(section) for section in change.section_path)
+        or bool(SUMMARY_PATTERN.search(change.after))
+    )
+
+
 def retrieve_blocks(blocks, scope, deltas):
     body = [b for b in blocks if b.kind == "body" and not is_summary(b)]
     headings = [b for b in blocks if b.kind == "heading" and not any(
@@ -86,7 +95,8 @@ def retrieve_blocks(blocks, scope, deltas):
     return selected_body, selected_headings
 
 
-def validate_plan(plan: MarkdownPlan, deltas: list[Delta], allowed_blocks, allowed_headings, documents):
+def validate_plan(plan: MarkdownPlan, deltas: list[Delta], allowed_blocks, allowed_headings,
+                  documents, allow_structure_change=False):
     unique([op.operation_id for op in plan.operations], "修改操作")
     targets = [getattr(op, "target_block_id", None) or getattr(op, "target_heading_id")
                for op in plan.operations]
@@ -110,7 +120,25 @@ def validate_plan(plan: MarkdownPlan, deltas: list[Delta], allowed_blocks, allow
             raise RadarError("invalid_patch", "修改了召回范围外的正文块")
         if isinstance(op, AppendMarkdownBlock) and op.target_heading_id not in allowed_heading_ids:
             raise RadarError("invalid_patch", "向召回范围外的章节增加了内容")
-        if any(HEADING_PATTERN.match(line) for line in op.after_text.splitlines()):
+        if isinstance(op, (AppendMarkdownSection, RenameMarkdownSection)):
+            if not allow_structure_change:
+                raise RadarError("invalid_patch", "本次请求未允许调整报告章节结构")
+            if op.target_heading_id not in allowed_heading_ids:
+                raise RadarError("invalid_patch", "结构调整目标不在允许范围内")
+            target = next(b for b in allowed_headings if b.block_id == op.target_heading_id)
+            if isinstance(op, AppendMarkdownSection):
+                if op.heading_level != target.heading_level + 1:
+                    raise RadarError("invalid_patch", "新增章节必须是目标章节的直接下级")
+                if HEADING_PATTERN.match(op.heading_title) or "\n" in op.heading_title:
+                    raise RadarError("invalid_patch", "新增章节标题格式无效")
+                if any(HEADING_PATTERN.match(line) for line in op.after_text.splitlines()):
+                    raise RadarError("invalid_patch", "新增章节正文不能继续创建其他章节")
+            else:
+                if target.heading_level == 1:
+                    raise RadarError("invalid_patch", "不能通过模块调整修改报告主题标题")
+                if "\n" in op.after_text or HEADING_PATTERN.match(op.after_text):
+                    raise RadarError("invalid_patch", "章节新名称只能包含单行标题文字")
+        elif any(HEADING_PATTERN.match(line) for line in op.after_text.splitlines()):
             raise RadarError("invalid_patch", "第一版不允许通过正文操作增加或改变报告章节")
         allowed_refs = {digest(link.ref) for delta_id in op.delta_ids
                         for link in delta_map[delta_id].evidence_links}
@@ -140,7 +168,7 @@ def apply_operations(content: str, blocks, operations: list[MarkdownOperation], 
                 raise RadarError("invalid_patch", "正文块哈希不匹配")
             start, end, kind, before = target.line_start - 1, target.line_end, "revise", target.text
             section = target.section_path
-        else:
+        elif isinstance(op, AppendMarkdownBlock):
             target = block_map[op.target_heading_id]
             if target.kind != "heading" or target.text_hash != op.expected_text_hash:
                 raise RadarError("invalid_patch", "目标章节哈希不匹配")
@@ -151,10 +179,35 @@ def apply_operations(content: str, blocks, operations: list[MarkdownOperation], 
                     start = candidate.line_start - 1
                     break
             end, kind, before, section = start, "append", None, target.section_path
+        elif isinstance(op, AppendMarkdownSection):
+            target = block_map[op.target_heading_id]
+            if target.kind != "heading" or target.text_hash != op.expected_text_hash:
+                raise RadarError("invalid_patch", "新增章节的父章节哈希不匹配")
+            start = len(lines)
+            for candidate_block in blocks:
+                if (candidate_block.line_start > target.line_start and candidate_block.kind == "heading"
+                        and candidate_block.heading_level <= target.heading_level):
+                    start = candidate_block.line_start - 1
+                    break
+            end, kind, before = start, "append_section", None
+            section = [*target.section_path, op.heading_title]
+        else:
+            target = block_map[op.target_heading_id]
+            if target.kind != "heading" or target.text_hash != op.expected_text_hash:
+                raise RadarError("invalid_patch", "待改名章节哈希不匹配")
+            start, end, kind, before = target.line_start - 1, target.line_end, "rename_section", target.text
+            section = [*target.section_path[:-1], op.after_text]
         source = "\n".join(ref.quote for ref in op.evidence_refs)
         check_added_numbers(before, op.after_text, source)
-        replacement = _replacement_lines(op.after_text, newline)
-        if kind == "append":
+        if isinstance(op, AppendMarkdownSection):
+            replacement = _replacement_lines(
+                f"{'#' * op.heading_level} {op.heading_title}\n\n{op.after_text}", newline
+            )
+        elif isinstance(op, RenameMarkdownSection):
+            replacement = _replacement_lines(f"{'#' * target.heading_level} {op.after_text}", newline)
+        else:
+            replacement = _replacement_lines(op.after_text, newline)
+        if kind in {"append", "append_section"}:
             if start and lines[start - 1].strip():
                 replacement.insert(0, newline)
             replacement.append(newline)
@@ -162,7 +215,11 @@ def apply_operations(content: str, blocks, operations: list[MarkdownOperation], 
         accepted = sorted({segment for did in op.delta_ids for segment in delta_map[did].accepted_segment_ids})
         changes.append(MarkdownChange(
             operation_id=op.operation_id, change_type=kind, section_path=section,
-            line_before=target.line_start, before=before, after=op.after_text,
+            line_before=target.line_start, before=before,
+            after=(f"{'#' * op.heading_level} {op.heading_title}\n\n{op.after_text}"
+                   if isinstance(op, AppendMarkdownSection) else
+                   f"{'#' * target.heading_level} {op.after_text}"
+                   if isinstance(op, RenameMarkdownSection) else op.after_text),
             reason=op.reason, location_reason=op.location_reason, decision_impact=op.decision_impact,
             accepted_segment_ids=accepted, evidence_refs=op.evidence_refs,
             validation_checks=[

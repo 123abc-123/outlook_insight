@@ -1,7 +1,7 @@
 from .errors import RadarError
 from .evidence import digest, dump, merge_documents, validate_ref
 from .markdown import (apply_dependency_decisions, apply_operations, attach_reviews,
-                       parse_markdown, report_topic, retrieve_blocks, summary_targets,
+                       is_sensitive_change, parse_markdown, report_topic, retrieve_blocks, summary_targets,
                        validate_plan)
 from .schemas import (DeltaResult, MarkdownDependencyReview, MarkdownPlan, MarkdownReview,
                       MarkdownUpdateResult, ScopeResult, unique)
@@ -23,7 +23,13 @@ def validate_deltas(extracted, accepted_ids, documents):
         raise RadarError("invalid_delta", "认知增量提取遗漏了被采纳片段")
 
 
-def update_markdown_report(req, model, versions):
+def commit_markdown_report_update(req, versions):
+    """提交已经展示并由用户确认的候选报告；本函数不会调用模型重新生成内容。"""
+    return versions.commit_preview(req)
+
+
+def prepare_markdown_report_update(req, model, versions):
+    """生成更新；普通正文可自动提交，核心结论、建议或结构变化必须返回待确认版本。"""
     previous = versions.lookup(req)
     if previous:
         return previous
@@ -53,7 +59,9 @@ def update_markdown_report(req, model, versions):
     if not blocks:
         return versions.finish(req, result("failed", unresolved_items=["报告中没有可更新的 Markdown 内容块"]), base_hash)
     topic = report_topic(blocks, versions.resolve_source(req.report_path)[0].stem)
-    documents = merge_documents(req.current_turn.documents)
+    new_documents = merge_documents(req.current_turn.documents)
+    historical_documents = merge_documents(req.historical_documents)
+    documents = merge_documents(historical_documents, new_documents)
     context = {
         "topic": topic, "question": req.current_turn.question,
         "accepted_segments": accepted, "previous_turn_context_only": dump(req.previous_turn),
@@ -64,9 +72,9 @@ def update_markdown_report(req, model, versions):
             return versions.finish(req, result("needs_clarification", unresolved_items=scope.ambiguities), base_hash)
         extracted = model.generate("extract_deltas", {
             "scope": dump(scope), "accepted_segments": accepted,
-            "new_documents": [dump(d) for d in documents],
-            "historical_documents": [],
-            "note": "历史报告来自 Markdown 文件；本阶段只把输入文献当证据",
+            "new_documents": [dump(d) for d in new_documents],
+            "historical_documents": [dump(d) for d in historical_documents],
+            "note": "历史文献用于复核旧观点基础；本轮采纳内容仍是产生更新意图的唯一来源",
         }, DeltaResult)
         validate_deltas(extracted, accepted_ids, documents)
         unresolved = list(extracted.unresolved_items)
@@ -74,6 +82,13 @@ def update_markdown_report(req, model, versions):
         if unresolved:
             return versions.finish(req, result("evidence_insufficient", unresolved_items=unresolved), base_hash)
         allowed_blocks, allowed_headings = retrieve_blocks(blocks, scope, extracted.deltas)
+        if req.allow_structure_change:
+            known = {heading.block_id for heading in allowed_headings}
+            allowed_headings.extend(
+                heading for heading in blocks
+                if heading.kind == "heading" and heading.heading_level == 1
+                and heading.block_id not in known
+            )
         if extracted.deltas and not allowed_blocks and not allowed_headings:
             return versions.finish(req, result("needs_clarification", unresolved_items=[
                 "没有找到与本轮认知增量对应的报告章节，请明确希望更新的主题范围"
@@ -84,15 +99,21 @@ def update_markdown_report(req, model, versions):
             "allowed_blocks": [dump(b) for b in allowed_blocks],
             "allowed_headings": [dump(b) for b in allowed_headings],
             "documents": [dump(d) for d in documents],
+            "allow_structure_change": req.allow_structure_change,
             "operation_rules": {
                 "revise_block": "修改一个允许的正文块，保留不受影响的原意",
                 "append_to_section": "在允许的现有章节末尾增加一个正文块",
-                "forbidden": ["删除内容", "修改标题", "新增章节", "修改范围外的正文"],
+                "append_section": ("仅在 allow_structure_change=true 时，在允许的父章节下新增直接子章节；"
+                                   "该操作必须由用户确认后才能提交"),
+                "rename_section": ("仅在 allow_structure_change=true 时修改允许章节的名称；"
+                                   "该操作必须由用户确认后才能提交"),
+                "forbidden": ["删除章节", "移动章节", "修改范围外的正文"],
             },
         }, MarkdownPlan)
         if plan.unresolved_items:
             return versions.finish(req, result("evidence_insufficient", unresolved_items=plan.unresolved_items), base_hash)
-        validate_plan(plan, extracted.deltas, allowed_blocks, allowed_headings, documents)
+        validate_plan(plan, extracted.deltas, allowed_blocks, allowed_headings, documents,
+                      req.allow_structure_change)
         candidate, changes = apply_operations(content, blocks, plan.operations, extracted.deltas)
         direct_ids = {op.operation_id for op in plan.operations}
         dependency_review = MarkdownDependencyReview(decisions=[])
@@ -125,12 +146,23 @@ def update_markdown_report(req, model, versions):
             return versions.finish(req, result(
                 "no_change", after_report_path=str(before_path), changes=[]
             ), base_hash)
-        return versions.finish(req, result(
-            "updated", new_version=base_version + 1, changes=changes
-        ), base_hash, candidate)
+        prepared = result("updated", new_version=base_version + 1, changes=changes)
+        confirmation_required = (
+            req.confirmation_policy == "always"
+            or any(is_sensitive_change(change) for change in changes)
+        )
+        if confirmation_required:
+            return versions.save_preview(req, prepared, base_hash, candidate)
+        return versions.finish(req, prepared, base_hash, candidate)
     except RadarError as exc:
         if exc.http_status in {413, 502, 503}:
             raise
         return versions.finish(req, result(
             "failed", unresolved_items=[f"{exc.code}: {exc.message}"]
         ), base_hash)
+
+
+def update_markdown_report(req, model, versions):
+    if req.action == "commit":
+        return commit_markdown_report_update(req, versions)
+    return prepare_markdown_report_update(req, model, versions)

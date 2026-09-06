@@ -48,7 +48,12 @@ def decompose(request, model):
             validate_ref(ref, documents)
             if digest(ref) not in candidate_refs:
                 raise RadarError("structure_out_of_scope", "结构审查引入了候选模块之外的证据")
-    modules = [Module(module_id=f"m_{uuid4().hex}", **dump(m)) for m in review.modules]
+    modules = [Module(module_id="m_" + digest({
+        "topic": candidates.topic_interpretation,
+        "core_question": m.core_question,
+        "scope_in": m.scope_in,
+    })[:24], **dump(m)) for m in review.modules]
+    unique([module.module_id for module in modules], "模块")
     assumptions = list(candidates.assumptions)
     if request.organization_context is None:
         assumptions.append("未提供公司背景；采用一般管理视角，公司适用性需验证")

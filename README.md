@@ -17,7 +17,9 @@ $env:RADAR_LLM_API_KEY = "公司提供的 Key"
 
 打开 `http://127.0.0.1:8000/docs` 查看请求结构。默认配置是 `unconfigured`，因此不会意外向示例 URL 发送内部材料。
 
-`/update` 的 `report_path` 使用相对于 `reports.root_dir` 的路径。首次调用保存 v1，成功更新后新建 v2 和对应的变更说明文件；后续自动基于最新版本继续更新。
+`/update` 的 `report_path` 使用相对于 `reports.root_dir` 的路径。`action=prepare` 生成更新；普通正文默认自动提交，管理摘要、核心结论、建议或章节结构变化会返回完整 `candidate_report` 和 `preview_id`。用户确认后使用 `action=commit` 提交该预览原文。首次调用保存 v1，成功更新后新建 v2 和对应的变更说明文件；所有历史版本永久保留，后续自动基于最新版本继续更新。
+
+更新请求可通过 `historical_documents` 单独提供旧观点依赖的历史文献。设置 `confirmation_policy=always` 可让所有修改都先预览；设置 `allow_structure_change=true` 才允许模型提出新增或重命名章节，结构变化始终需要用户确认。
 
 ## 验证
 

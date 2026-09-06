@@ -45,7 +45,9 @@ supported 表示材料直接支持讨论这个问题，不表示结论已证实�
 每个 delta 都必须有 disposition：change 必须有对应操作；duplicate 必须指向等价旧观点。
 保留旧观点未受影响的内容、条件和证据。add_evidence 只补引用。
 同一目标最多一个操作。旧修订号和 text_hash 从输入复制，不自行计算。
-不得自动增删模块或标题、重排结构、迁移观点、删除旧来源或写入未采纳内容。
+默认不得增删模块或标题、重排结构、迁移观点、删除旧来源或写入未采纳内容。
+只有输入明确给出 allow_structure_change=true 时，才可使用 append_section 或 rename_section；
+结构操作只能处理允许的章节，并将在用户确认完整候选报告后由程序提交。不得删除或移动章节。
 对需要进一步澄清或证据不足的事项返回 unresolved_items。""",
     "review_dependencies": """检查所有受直接修改影响的依赖观点、摘要和建议或指定 Markdown 块，每个目标返回一个决定。
 若原表述仍成立则 keep 且不返回 after；确需联动才 revise。

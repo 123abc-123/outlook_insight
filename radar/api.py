@@ -40,7 +40,7 @@ def create_app(model=None, store=None, report_root=None, history_root=None):
         result = update_markdown_report(request, app.state.model, app.state.markdown_versions)
         response.headers["X-Radar-Model-Mode"] = app.state.model.mode
         response.status_code = (409 if result.status == "version_conflict" else 422
-                                if result.status not in {"updated", "no_change"} else 200)
+                                if result.status not in {"updated", "preview_ready", "no_change"} else 200)
         return result
 
     return app

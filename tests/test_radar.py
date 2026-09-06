@@ -10,8 +10,8 @@ from fastapi.testclient import TestClient
 
 from radar.api import create_app
 from radar.config import RadarConfig, load_config
-from radar.demo import (AFTER_TEXT, DEMO_MARKDOWN, DemoModel, sample_decompose_request,
-                        sample_markdown_request)
+from radar.demo import (AFTER_TEXT, DEMO_MARKDOWN, NEW_TEXT, DemoModel, sample_decompose_request,
+                        reference, sample_markdown_request)
 from radar.errors import RadarError
 from radar.evidence import dump
 from radar.model import HTTPModel, UnconfiguredModel, model_from_config
@@ -74,6 +74,24 @@ def test_decompose_without_documents_does_not_call_model(markdown_setup):
     assert model.calls == []
 
 
+def test_decompose_uses_family_deduplication_and_stable_module_ids(markdown_setup):
+    model, _, app, _, _, _ = markdown_setup
+    req = sample_decompose_request()
+    req.documents[0].family_id = "family-1"
+    family_copy = req.documents[0].model_copy(deep=True)
+    family_copy.document_id = "family-copy"
+    family_copy.segments[0].text += "转载页面增加的编辑说明。"
+    req.documents.append(family_copy)
+    with TestClient(app) as client:
+        first = client.post("/decompose", json=dump(req)).json()
+        second = client.post("/decompose", json=dump(req)).json()
+    assert len([task for task, _ in model.calls if task == "extract_evidence"]) == 2
+    assert [item["module_id"] for item in first["modules"]] == [
+        item["module_id"] for item in second["modules"]
+    ]
+    assert first["structure_version"] == second["structure_version"]
+
+
 def test_markdown_update_creates_versions_and_explainable_change(markdown_setup):
     model, _, app, source, history_root, req = markdown_setup
     with TestClient(app) as client:
@@ -116,6 +134,95 @@ def test_next_update_reads_latest_file_and_preserves_history(markdown_setup):
     assert {path.name for path in history_root.rglob("v*.md")} == {
         "v000001.md", "v000002.md", "v000002_changes.md"
     }
+
+
+def test_sensitive_update_previews_full_report_then_commits_exact_candidate(markdown_setup):
+    _, store, _, source, history_root, req = markdown_setup
+
+    def revise_summary(value, payload):
+        for decision in value["decisions"]:
+            decision.update(action="revise", after_text="建议先验证人工复核成本，再判断推广范围。")
+        return value
+
+    app = create_app(ControlledModel({"review_dependencies": revise_summary}), store,
+                     source.parent, history_root)
+    with TestClient(app) as client:
+        preview = client.post("/update", json=dump(req)).json()
+        assert preview["status"] == "preview_ready"
+        assert preview["confirmation_required"] is True
+        assert AFTER_TEXT in preview["candidate_report"]
+        assert not list(history_root.rglob("v000002.md"))
+        commit = client.post("/update", json={
+            "action": "commit", "request_id": "commit-preview-1",
+            "report_path": req.report_path, "preview_id": preview["preview_id"],
+            "confirmed": True,
+        }).json()
+    assert commit["status"] == "updated" and commit["new_version"] == 2
+    assert Path(commit["after_report_path"]).read_text(encoding="utf-8") == preview["candidate_report"]
+    assert source.read_text(encoding="utf-8") == DEMO_MARKDOWN
+
+
+def test_historical_documents_are_separate_evidence_input(markdown_setup):
+    model, _, app, _, _, req = markdown_setup
+    historical = req.current_turn.documents[0].model_copy(deep=True)
+    historical.document_id = "I_HISTORY"
+    historical.segments[0].text = "历史试点曾假设人工复核成本可以忽略。"
+    req.historical_documents = [historical]
+    with TestClient(app) as client:
+        assert client.post("/update", json=dump(req)).status_code == 200
+    payload = next(payload for task, payload in model.calls if task == "extract_deltas")
+    assert [doc["document_id"] for doc in payload["new_documents"]] == ["I_NEW"]
+    assert [doc["document_id"] for doc in payload["historical_documents"]] == ["I_HISTORY"]
+
+
+def test_structure_change_is_preview_only_until_confirmed(markdown_setup):
+    _, store, _, source, history_root, req = markdown_setup
+
+    def add_section(value, payload):
+        root = next(item for item in payload["allowed_headings"] if item["heading_level"] == 1)
+        return {"operations": [{
+            "op": "append_section", "operation_id": "op_new_module",
+            "target_heading_id": root["block_id"], "expected_text_hash": root["text_hash"],
+            "heading_title": "成本验证与观察信号", "heading_level": 2,
+            "after_text": "人工复核成本需要在扩大推广前完成验证。",
+            "delta_ids": ["d_cost"], "evidence_refs": [reference("I_NEW", NEW_TEXT)],
+            "reason": "新增认识无法由现有章节完整承载",
+            "location_reason": "该章节与推广条件同属报告一级管理议题",
+            "decision_impact": "将成本验证提升为独立的管理判断模块",
+        }], "dispositions": [{"delta_id": "d_cost", "outcome": "change",
+                               "existing_claim_ids": [], "reason": "需要新增管理议题"}],
+                "unresolved_items": []}
+
+    req.allow_structure_change = True
+    app = create_app(ControlledModel({"plan_update": add_section}), store,
+                     source.parent, history_root)
+    with TestClient(app) as client:
+        preview = client.post("/update", json=dump(req)).json()
+        assert preview["status"] == "preview_ready"
+        assert preview["changes"][0]["change_type"] == "append_section"
+        assert "## 成本验证与观察信号" in preview["candidate_report"]
+        assert not list(history_root.rglob("v000002.md"))
+
+
+def test_stale_preview_cannot_be_committed(markdown_setup):
+    _, _, app, _, _, req = markdown_setup
+    req.confirmation_policy = "always"
+    other = req.model_copy(deep=True)
+    other.request_id = "preview-other"
+    other.adoption.adoption_id = "preview-adoption-other"
+    with TestClient(app) as client:
+        first = client.post("/update", json=dump(req)).json()
+        second = client.post("/update", json=dump(other)).json()
+        committed = client.post("/update", json={
+            "action": "commit", "request_id": "commit-first", "report_path": req.report_path,
+            "preview_id": first["preview_id"], "confirmed": True,
+        })
+        stale = client.post("/update", json={
+            "action": "commit", "request_id": "commit-stale", "report_path": req.report_path,
+            "preview_id": second["preview_id"], "confirmed": True,
+        })
+    assert committed.status_code == 200 and committed.json()["status"] == "updated"
+    assert stale.status_code == 409 and stale.json()["status"] == "version_conflict"
 
 
 def test_repeated_request_and_adoption_are_idempotent(markdown_setup):

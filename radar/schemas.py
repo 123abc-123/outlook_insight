@@ -197,15 +197,31 @@ class DeltaDisposition(Schema):
 
 
 class MarkdownUpdateRequest(Schema):
+    action: Literal["prepare", "commit"] = "prepare"
     request_id: Id
     report_path: Annotated[str, Field(min_length=1, max_length=500)]
     expected_version: int | None = Field(default=None, ge=1)
-    adoption: Adoption
-    current_turn: Turn
+    adoption: Adoption | None = None
+    current_turn: Turn | None = None
     previous_turn: PreviousTurn | None = None
+    historical_documents: list[Document] = Field(default_factory=list, max_length=200)
+    confirmation_policy: Literal["auto_routine", "always"] = "auto_routine"
+    allow_structure_change: bool = False
+    preview_id: Id | None = None
+    confirmed: bool = False
 
     @model_validator(mode="after")
     def adopted_revision(self):
+        if self.action == "commit":
+            if not self.preview_id:
+                raise ValueError("commit 必须提供 preview_id")
+            if not self.confirmed:
+                raise ValueError("commit 必须明确 confirmed=true")
+            return self
+        if self.adoption is None or self.current_turn is None:
+            raise ValueError("prepare 必须提供 adoption 和 current_turn")
+        if self.preview_id is not None or self.confirmed:
+            raise ValueError("prepare 不能提供 preview_id 或 confirmed")
         a, t = self.adoption, self.current_turn
         if (a.turn_id, a.answer_revision) != (t.turn_id, t.answer_revision):
             raise ValueError("采纳记录与本轮回答修订不一致")
@@ -248,8 +264,23 @@ class AppendMarkdownBlock(MarkdownOperationBase):
     expected_text_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
+class AppendMarkdownSection(MarkdownOperationBase):
+    op: Literal["append_section"]
+    target_heading_id: Id
+    expected_text_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    heading_title: Text
+    heading_level: int = Field(ge=2, le=6)
+
+
+class RenameMarkdownSection(MarkdownOperationBase):
+    op: Literal["rename_section"]
+    target_heading_id: Id
+    expected_text_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
 MarkdownOperation = Annotated[
-    ReviseMarkdownBlock | AppendMarkdownBlock, Field(discriminator="op")
+    ReviseMarkdownBlock | AppendMarkdownBlock | AppendMarkdownSection | RenameMarkdownSection,
+    Field(discriminator="op")
 ]
 
 
@@ -297,7 +328,7 @@ class MarkdownReview(Schema):
 
 class MarkdownChange(Schema):
     operation_id: Id
-    change_type: Literal["revise", "append", "dependency"]
+    change_type: Literal["revise", "append", "append_section", "rename_section", "dependency"]
     section_path: list[str]
     line_before: int | None = None
     before: str | None = None
@@ -312,7 +343,7 @@ class MarkdownChange(Schema):
 
 
 class MarkdownUpdateResult(Schema):
-    status: Literal["updated", "no_change", "needs_clarification", "evidence_insufficient",
+    status: Literal["updated", "preview_ready", "no_change", "needs_clarification", "evidence_insufficient",
                     "version_conflict", "failed"]
     request_id: str
     report_id: str
@@ -321,6 +352,9 @@ class MarkdownUpdateResult(Schema):
     before_report_path: str | None = None
     after_report_path: str | None = None
     change_log_path: str | None = None
+    preview_id: str | None = None
+    confirmation_required: bool = False
+    candidate_report: str | None = None
     changes: list[MarkdownChange] = Field(default_factory=list)
     unresolved_items: list[str] = Field(default_factory=list)
 
