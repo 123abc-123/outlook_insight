@@ -1,0 +1,81 @@
+# 认知雷达运行配置。生产环境建议复制为 radar.local.toml，并通过
+# RADAR_CONFIG=config/radar.local.toml 指定；radar.local.toml 已被 Git 忽略。
+
+[app]
+# unconfigured: 接口启动，但调用模型时返回明确错误
+# live: 调用公司内部大模型
+# demo: 只运行仓库中的虚构演示数据，不能处理真实请求
+model_mode = "unconfigured"
+database_path = "data/radar.sqlite3"
+
+[reports]
+# /update 只允许读取该目录中的相对 .md 路径，避免任意文件访问。
+root_dir = "reports"
+# 每个报告会在这里保存 v000001.md、v000002.md 等全部版本和变更说明。
+history_dir = "data/report_versions"
+
+[llm_profiles.default]
+url = "http://your-internal-llm.example/v1/chat/completions"
+model = "your-model-name"
+# 推荐把真实 Key 放入环境变量 RADAR_LLM_API_KEY。
+api_key_env = "RADAR_LLM_API_KEY"
+# 也支持直接写 api_key = "..."，但不要把含真实 Key 的本地配置提交到 Git。
+timeout_seconds = 90.0
+max_context_chars = 180000
+temperature = 0.0
+max_tokens = 6000
+top_p = 1.0
+verify_tls = true
+trust_env = false
+
+# 可选：不同任务使用不同模型或地址。
+# [llm_profiles.large]
+# url = "http://your-internal-llm.example/v1/chat/completions"
+# model = "your-large-model"
+# api_key_env = "RADAR_LLM_API_KEY"
+# timeout_seconds = 120.0
+# max_context_chars = 300000
+# temperature = 0.0
+# max_tokens = 10000
+
+# 拆分接口的三次模型任务
+[tasks.extract_evidence]
+profile = "default"
+temperature = 0.0
+max_tokens = 5000
+
+[tasks.candidate_modules]
+profile = "default"
+temperature = 0.1
+max_tokens = 7000
+
+[tasks.review_structure]
+profile = "default"
+temperature = 0.0
+max_tokens = 5000
+
+# 更新接口的五次模型任务
+[tasks.resolve_scope]
+profile = "default"
+temperature = 0.0
+max_tokens = 2500
+
+[tasks.extract_deltas]
+profile = "default"
+temperature = 0.0
+max_tokens = 6000
+
+[tasks.plan_update]
+profile = "default"
+temperature = 0.0
+max_tokens = 7000
+
+[tasks.review_dependencies]
+profile = "default"
+temperature = 0.0
+max_tokens = 5000
+
+[tasks.review_update]
+profile = "default"
+temperature = 0.0
+max_tokens = 5000
