@@ -87,7 +87,9 @@ def decompose(request, model, default_organization_context=None):
     if organization_context is None:
         assumptions.append("未提供公司背景；采用一般管理视角，公司适用性需验证")
     return DecomposeResult(
-        status=("insufficient_input" if not modules else "provisional"
+        status=("insufficient_input" if not modules or all(
+                    module.evidence_status == "gap" for module in modules
+                ) else "provisional"
                 if any(m.evidence_status != "supported" for m in modules) else "ready"),
         topic_interpretation=candidates.topic_interpretation, selected_lens=candidates.selected_lens,
         assumptions=list(dict.fromkeys(assumptions)), themes=[module.title for module in modules],

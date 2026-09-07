@@ -131,6 +131,12 @@ class ReviewedStructure(Schema):
     supplemental_search_requests: list[SearchRequest]
     review_notes: list[Text]
 
+    @model_validator(mode="after")
+    def limited_gaps(self):
+        if sum(module.evidence_status == "gap" for module in self.modules) > 2:
+            raise ValueError("最终结构最多保留两个影响领导判断的关键证据缺口")
+        return self
+
 
 class DecomposeResult(Schema):
     status: Literal["ready", "provisional", "insufficient_input"]

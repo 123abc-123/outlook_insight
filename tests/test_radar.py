@@ -110,6 +110,23 @@ def test_decompose_receives_company_context_and_source_policy(markdown_setup):
     assert ModuleDraft.model_json_schema()["properties"]["title"]["maxLength"] == 24
 
 
+def test_decompose_with_only_evidence_gaps_is_insufficient(markdown_setup):
+    _, store, _, source, history_root, _ = markdown_setup
+
+    def gaps_only(value, payload):
+        value["modules"] = value["modules"][:2]
+        for item in value["modules"]:
+            item.update(evidence_refs=[], evidence_status="gap",
+                        missing_information=["缺少可用于形成正式主题的直接材料"])
+        return value
+
+    app = create_app(ControlledModel({"review_structure": gaps_only}), store,
+                     source.parent, history_root)
+    with TestClient(app) as client:
+        result = client.post("/decompose", json=dump(sample_decompose_request())).json()
+    assert result["status"] == "insufficient_input"
+
+
 def test_markdown_update_creates_versions_and_explainable_change(markdown_setup):
     model, _, app, source, history_root, req = markdown_setup
     with TestClient(app) as client:
