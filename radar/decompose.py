@@ -1,7 +1,7 @@
 from uuid import uuid4
 
 from .errors import RadarError
-from .evidence import deduplicate, digest, dump, validate_ref
+from .evidence import deduplicate, digest, dump, rank_documents, validate_ref
 from .prompts import LENSES, SOURCE_POLICY
 from .schemas import (CandidateStructure, DecomposeResult, ExtractedEvidence, Module,
                       OrganizationContext, ReviewedStructure, unique)
@@ -38,6 +38,25 @@ def decompose(request, model, default_organization_context=None):
             assumptions=[], themes=[], modules=[], pending_questions=["缺少文献，无法形成有证据支持的模块结构"],
             supplemental_search_requests=[], structure_version="v1-empty", review_notes=[],
         )
+    organization_context = merge_organization_context(
+        request.organization_context, default_organization_context,
+    )
+    documents, document_assessments = rank_documents(model, documents, {
+        "task_context": "topic_decomposition",
+        "topic": request.topic,
+        "leadership_question": request.leadership_question,
+        "organization_context": dump(organization_context),
+        "research_scope": dump(request.research_scope),
+        "source_policy": SOURCE_POLICY,
+    })
+    if not documents:
+        return DecomposeResult(
+            status="insufficient_input", topic_interpretation=request.topic, selected_lens="待确定",
+            assumptions=[], themes=[], modules=[], pending_questions=["现有文献与 Topic 无直接关系，需补充检索"],
+            supplemental_search_requests=[], structure_version="v1-irrelevant", review_notes=[
+                "文献整理阶段未发现可用于模块拆分的相关材料"
+            ],
+        )
     units = []
     for doc in documents:
         extracted = model.generate("extract_evidence", {"document": dump(doc)}, ExtractedEvidence)
@@ -46,14 +65,12 @@ def decompose(request, model, default_organization_context=None):
             validate_ref(unit.source_ref, [doc])
             unit.evidence_id = f"e_{uuid4().hex}"
             units.append(dump(unit))
-    organization_context = merge_organization_context(
-        request.organization_context, default_organization_context,
-    )
     context = {
         "topic": request.topic, "leadership_question": request.leadership_question,
         "organization_context": dump(organization_context),
         "research_scope": dump(request.research_scope), "lenses": LENSES,
         "source_policy": SOURCE_POLICY,
+        "document_assessments": document_assessments,
         "evidence_units": units, "documents": [dump(d) for d in documents],
     }
     candidates = model.generate("candidate_modules", context, CandidateStructure)

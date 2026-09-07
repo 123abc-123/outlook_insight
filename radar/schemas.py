@@ -5,7 +5,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 Text = Annotated[str, Field(min_length=1, max_length=12000)]
-ModuleTitle = Annotated[str, Field(min_length=2, max_length=24)]
+ModuleTitle = Annotated[str, Field(min_length=2, max_length=6)]
 Id = Annotated[str, Field(min_length=1, max_length=120, pattern=r"^[\w.:-]+$")]
 ClaimKind = Literal["fact", "assessment", "recommendation", "user_constraint"]
 
@@ -103,6 +103,22 @@ class EvidenceUnit(Schema):
 
 class ExtractedEvidence(Schema):
     units: list[EvidenceUnit]
+
+
+class DocumentAssessment(Schema):
+    document_id: Id
+    relevance: int = Field(ge=0, le=2)
+    decision_value: int = Field(ge=0, le=2)
+    directness: int = Field(ge=0, le=2)
+    applicability: int = Field(ge=0, le=2)
+    freshness: int = Field(ge=0, le=2)
+    evidence_role: Literal["supports", "contradicts", "qualifies", "context", "irrelevant"]
+    include: bool
+    reason: Text
+
+
+class DocumentRanking(Schema):
+    assessments: list[DocumentAssessment]
 
 
 class CandidateModule(ModuleDraft):

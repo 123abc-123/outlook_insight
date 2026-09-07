@@ -63,7 +63,7 @@ def test_decompose_deduplicates_documents_and_marks_gaps(markdown_setup):
     assert response.status_code == 200
     assert response.json()["status"] == "provisional"
     assert response.json()["themes"] == [item["title"] for item in response.json()["modules"]]
-    assert all(len(title) <= 24 for title in response.json()["themes"])
+    assert all(2 <= len(title) <= 6 for title in response.json()["themes"])
     assert len([task for task, _ in model.calls if task == "extract_evidence"]) == 1
     assert any(module["evidence_status"] == "gap" for module in response.json()["modules"])
 
@@ -107,7 +107,39 @@ def test_decompose_receives_company_context_and_source_policy(markdown_setup):
     assert payload["organization_context"]["organization_name"] == "长鑫存储"
     assert payload["organization_context"]["leadership_focus_by_topic_type"]["新技术或能力"]
     assert "hard_gate" in payload["source_policy"]
-    assert ModuleDraft.model_json_schema()["properties"]["title"]["maxLength"] == 24
+    assert ModuleDraft.model_json_schema()["properties"]["title"]["maxLength"] == 6
+
+
+def test_decompose_ranks_materials_and_excludes_only_irrelevant_documents(markdown_setup):
+    _, store, _, source, history_root, _ = markdown_setup
+
+    def assess(value, payload):
+        for item in value["assessments"]:
+            if item["document_id"] == "I_LOW":
+                item.update(relevance=1, decision_value=1, directness=1, applicability=1)
+            elif item["document_id"] == "I_IRRELEVANT":
+                item.update(relevance=0, decision_value=0, directness=0, applicability=0,
+                            freshness=1, evidence_role="irrelevant", include=False,
+                            reason="与 Topic 和领导问题无关")
+        return value
+
+    req = sample_decompose_request()
+    low = req.documents[0].model_copy(deep=True)
+    low.document_id = "I_LOW"
+    low.segments[0].text = "相关但决策价值较低的背景材料。"
+    irrelevant = req.documents[0].model_copy(deep=True)
+    irrelevant.document_id = "I_IRRELEVANT"
+    irrelevant.segments[0].text = "与客服试点无关的园区绿化通知。"
+    req.documents.extend([low, irrelevant])
+    model = ControlledModel({"rank_documents": assess})
+    app = create_app(model, store, source.parent, history_root)
+    with TestClient(app) as client:
+        assert client.post("/decompose", json=dump(req)).status_code == 200
+    ranking = next(payload for task, payload in model.calls if task == "rank_documents")
+    assert ranking["task_context"] == "topic_decomposition"
+    extracted_ids = [payload["document"]["document_id"]
+                     for task, payload in model.calls if task == "extract_evidence"]
+    assert extracted_ids == ["I_NEW", "I_LOW"]
 
 
 def test_decompose_with_only_evidence_gaps_is_insufficient(markdown_setup):
@@ -209,6 +241,35 @@ def test_historical_documents_are_separate_evidence_input(markdown_setup):
     assert [doc["document_id"] for doc in payload["new_documents"]] == ["I_NEW"]
     assert [doc["document_id"] for doc in payload["historical_documents"]] == ["I_HISTORY"]
     assert payload["source_policy"]["independence_rule"]
+    assert {item["document_id"] for item in payload["document_assessments"]} == {
+        "I_NEW", "I_HISTORY"
+    }
+
+
+def test_update_excludes_irrelevant_search_material_before_delta_extraction(markdown_setup):
+    _, store, _, source, history_root, req = markdown_setup
+
+    def assess(value, payload):
+        for item in value["assessments"]:
+            if item["document_id"] == "I_IRRELEVANT":
+                item.update(relevance=0, decision_value=0, directness=0, applicability=0,
+                            evidence_role="irrelevant", include=False,
+                            reason="与被采纳内容无关")
+        return value
+
+    irrelevant = req.current_turn.documents[0].model_copy(deep=True)
+    irrelevant.document_id = "I_IRRELEVANT"
+    irrelevant.segments[0].text = "与被采纳推广判断无关的园区绿化通知。"
+    req.current_turn.documents.append(irrelevant)
+    model = ControlledModel({"rank_documents": assess})
+    app = create_app(model, store, source.parent, history_root)
+    with TestClient(app) as client:
+        assert client.post("/update", json=dump(req)).status_code == 200
+    payload = next(payload for task, payload in model.calls if task == "extract_deltas")
+    assert [doc["document_id"] for doc in payload["new_documents"]] == ["I_NEW"]
+    assert {item["document_id"] for item in payload["document_assessments"]} == {
+        "I_NEW", "I_IRRELEVANT"
+    }
 
 
 def test_structure_change_is_preview_only_until_confirmed(markdown_setup):
@@ -385,7 +446,7 @@ def test_repository_config_is_safe_and_complete():
         "新技术或能力", "行业市场变化", "政策变化", "竞争对象", "经营问题",
     }
     assert set(config.tasks) == {
-        "extract_evidence", "candidate_modules", "review_structure", "resolve_scope",
+        "rank_documents", "extract_evidence", "candidate_modules", "review_structure", "resolve_scope",
         "extract_deltas", "plan_update", "review_dependencies", "review_update",
     }
 
@@ -398,7 +459,7 @@ def live_config():
             "api_key_env": "COMPANY_MODEL_KEY", "temperature": 0.4, "max_tokens": 1000,
         }},
         "tasks": {task: {"profile": "default"} for task in (
-            "extract_evidence", "candidate_modules", "review_structure", "resolve_scope",
+            "rank_documents", "extract_evidence", "candidate_modules", "review_structure", "resolve_scope",
             "extract_deltas", "plan_update", "review_dependencies", "review_update")},
     }
     raw["tasks"]["review_update"].update({"temperature": 0.0, "max_tokens": 321})

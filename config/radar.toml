@@ -94,7 +94,12 @@ trust_env = false
 # temperature = 0.0
 # max_tokens = 10000
 
-# 拆分接口的三次模型任务
+# 拆分接口的四类模型任务（extract_evidence 会按纳入文献逐篇执行）
+[tasks.rank_documents]
+profile = "default"
+temperature = 0.0
+max_tokens = 5000
+
 [tasks.extract_evidence]
 profile = "default"
 temperature = 0.0

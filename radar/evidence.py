@@ -3,7 +3,7 @@ import json
 import re
 
 from .errors import RadarError
-from .schemas import Document, EvidenceRef
+from .schemas import Document, DocumentRanking, EvidenceRef, unique
 
 
 def dump(value):
@@ -49,6 +49,37 @@ def deduplicate(documents):
             if doc.family_id:
                 seen_families.add(doc.family_id)
     return result
+
+
+def rank_documents(model, documents, context):
+    """按决策价值整理材料；只剔除模型明确判定为无关的文献。"""
+    if not documents:
+        return [], []
+    ranking = model.generate("rank_documents", {
+        **context,
+        "documents": [dump(document) for document in documents],
+    }, DocumentRanking)
+    unique([item.document_id for item in ranking.assessments], "文献排序")
+    expected = {document.document_id for document in documents}
+    actual = {item.document_id for item in ranking.assessments}
+    if actual != expected:
+        raise RadarError("invalid_document_ranking", "文献整理结果必须逐篇覆盖输入文献")
+    for item in ranking.assessments:
+        relevant = item.relevance > 0 and item.evidence_role != "irrelevant"
+        if item.include != relevant:
+            raise RadarError("invalid_document_ranking", "文献是否纳入与相关性判断不一致")
+    by_id = {document.document_id: document for document in documents}
+    ordered = sorted(
+        ranking.assessments,
+        key=lambda item: (
+            4 * item.relevance + 3 * item.decision_value + 2 * item.applicability
+            + item.directness + item.freshness,
+            item.document_id,
+        ),
+        reverse=True,
+    )
+    selected = [by_id[item.document_id] for item in ordered if item.include]
+    return selected, [dump(item) for item in ordered]
 
 
 def validate_ref(ref: EvidenceRef, documents: list[Document]):

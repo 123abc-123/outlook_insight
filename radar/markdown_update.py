@@ -1,5 +1,5 @@
 from .errors import RadarError
-from .evidence import digest, dump, merge_documents, validate_ref
+from .evidence import digest, dump, merge_documents, rank_documents, validate_ref
 from .markdown import (apply_dependency_decisions, apply_operations, attach_reviews,
                        is_sensitive_change, parse_markdown, report_topic, retrieve_blocks, summary_targets,
                        validate_plan)
@@ -29,7 +29,7 @@ def commit_markdown_report_update(req, versions):
     return versions.commit_preview(req)
 
 
-def prepare_markdown_report_update(req, model, versions):
+def prepare_markdown_report_update(req, model, versions, organization_context=None):
     """生成更新；普通正文可自动提交，核心结论、建议或结构变化必须返回待确认版本。"""
     previous = versions.lookup(req)
     if previous:
@@ -66,15 +66,28 @@ def prepare_markdown_report_update(req, model, versions):
     context = {
         "topic": topic, "question": req.current_turn.question,
         "accepted_segments": accepted, "previous_turn_context_only": dump(req.previous_turn),
+        "organization_context": dump(organization_context),
     }
     try:
         scope = model.generate("resolve_scope", context, ScopeResult)
         if scope.ambiguities:
             return versions.finish(req, result("needs_clarification", unresolved_items=scope.ambiguities), base_hash)
+        documents, document_assessments = rank_documents(model, documents, {
+            **context,
+            "task_context": "markdown_report_update",
+            "resolved_scope": dump(scope),
+            "source_policy": SOURCE_POLICY,
+        })
+        selected_ids = {document.document_id for document in documents}
+        new_documents = [document for document in new_documents if document.document_id in selected_ids]
+        historical_documents = [
+            document for document in historical_documents if document.document_id in selected_ids
+        ]
         extracted = model.generate("extract_deltas", {
             "scope": dump(scope), "accepted_segments": accepted,
             "new_documents": [dump(d) for d in new_documents],
             "historical_documents": [dump(d) for d in historical_documents],
+            "document_assessments": document_assessments,
             "source_policy": SOURCE_POLICY,
             "note": "历史文献用于复核旧观点基础；本轮采纳内容仍是产生更新意图的唯一来源",
         }, DeltaResult)
@@ -101,6 +114,7 @@ def prepare_markdown_report_update(req, model, versions):
             "allowed_blocks": [dump(b) for b in allowed_blocks],
             "allowed_headings": [dump(b) for b in allowed_headings],
             "documents": [dump(d) for d in documents],
+            "document_assessments": document_assessments,
             "source_policy": SOURCE_POLICY,
             "allow_structure_change": req.allow_structure_change,
             "operation_rules": {
@@ -135,6 +149,7 @@ def prepare_markdown_report_update(req, model, versions):
             **context, "report_format": "markdown", "before": content, "after": candidate,
             "deltas": [dump(d) for d in extracted.deltas], "changes": [dump(c) for c in changes],
             "documents": [dump(d) for d in documents],
+            "document_assessments": document_assessments,
             "source_policy": SOURCE_POLICY,
             "required_assessment": [
                 "证据是否支持修改后的表述", "修改是否放在回答同一管理问题的章节",
@@ -166,7 +181,7 @@ def prepare_markdown_report_update(req, model, versions):
         ), base_hash)
 
 
-def update_markdown_report(req, model, versions):
+def update_markdown_report(req, model, versions, organization_context=None):
     if req.action == "commit":
         return commit_markdown_report_update(req, versions)
-    return prepare_markdown_report_update(req, model, versions)
+    return prepare_markdown_report_update(req, model, versions, organization_context)

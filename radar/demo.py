@@ -17,7 +17,7 @@ DEMO_MARKDOWN = f"""# {TOPIC}
 
 建议继续评估推广条件。
 
-## 优先场景与推广条件
+## 推广条件
 
 {OLD_TEXT}
 
@@ -80,6 +80,13 @@ class DemoModel:
     def response(self, task, p):
         if p.get("topic", TOPIC) != TOPIC:
             raise RadarError("demo_only", "demo 模式只支持随附虚构案例，请配置真实模型处理其他 Topic")
+        if task == "rank_documents":
+            return {"assessments": [{
+                "document_id": doc["document_id"], "relevance": 2, "decision_value": 2,
+                "directness": 2, "applicability": 2, "freshness": 1,
+                "evidence_role": "qualifies", "include": True,
+                "reason": "内部试点材料直接限定推广判断",
+            } for doc in p["documents"]]}
         if task == "extract_evidence":
             doc = p["document"]
             segment = doc["segments"][0]
@@ -91,9 +98,9 @@ class DemoModel:
         if task == "candidate_modules":
             ref = p["evidence_units"][0]["source_ref"]
             candidates = [
-                module("优先场景与推广条件", "客服试点是否值得推广及验证成本", ref),
-                module("投入条件与成本结构", "人工复核成本是否纳入测算", ref),
-                module("质量要求与验证指标", "还需要什么质量验证数据", ref, gap=True),
+                module("推广条件", "客服试点是否值得推广及验证成本", ref),
+                module("成本结构", "人工复核成本是否纳入测算", ref),
+                module("质量验证", "还需要什么质量验证数据", ref, gap=True),
             ]
             for c in candidates:
                 c.update(relevance=2, decision_value=2, evidence_quality=1, uniqueness=2)
