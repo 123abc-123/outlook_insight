@@ -3,6 +3,7 @@ from .evidence import digest, dump, merge_documents, validate_ref
 from .markdown import (apply_dependency_decisions, apply_operations, attach_reviews,
                        is_sensitive_change, parse_markdown, report_topic, retrieve_blocks, summary_targets,
                        validate_plan)
+from .prompts import SOURCE_POLICY
 from .schemas import (DeltaResult, MarkdownDependencyReview, MarkdownPlan, MarkdownReview,
                       MarkdownUpdateResult, ScopeResult, unique)
 
@@ -74,6 +75,7 @@ def prepare_markdown_report_update(req, model, versions):
             "scope": dump(scope), "accepted_segments": accepted,
             "new_documents": [dump(d) for d in new_documents],
             "historical_documents": [dump(d) for d in historical_documents],
+            "source_policy": SOURCE_POLICY,
             "note": "历史文献用于复核旧观点基础；本轮采纳内容仍是产生更新意图的唯一来源",
         }, DeltaResult)
         validate_deltas(extracted, accepted_ids, documents)
@@ -99,6 +101,7 @@ def prepare_markdown_report_update(req, model, versions):
             "allowed_blocks": [dump(b) for b in allowed_blocks],
             "allowed_headings": [dump(b) for b in allowed_headings],
             "documents": [dump(d) for d in documents],
+            "source_policy": SOURCE_POLICY,
             "allow_structure_change": req.allow_structure_change,
             "operation_rules": {
                 "revise_block": "修改一个允许的正文块，保留不受影响的原意",
@@ -132,6 +135,7 @@ def prepare_markdown_report_update(req, model, versions):
             **context, "report_format": "markdown", "before": content, "after": candidate,
             "deltas": [dump(d) for d in extracted.deltas], "changes": [dump(c) for c in changes],
             "documents": [dump(d) for d in documents],
+            "source_policy": SOURCE_POLICY,
             "required_assessment": [
                 "证据是否支持修改后的表述", "修改是否放在回答同一管理问题的章节",
                 "是否扩大适用范围或丢失限定", "是否误改无关内容",

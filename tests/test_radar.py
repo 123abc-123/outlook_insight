@@ -15,7 +15,7 @@ from radar.demo import (AFTER_TEXT, DEMO_MARKDOWN, NEW_TEXT, DemoModel, sample_d
 from radar.errors import RadarError
 from radar.evidence import dump
 from radar.model import HTTPModel, UnconfiguredModel, model_from_config
-from radar.schemas import MarkdownReview
+from radar.schemas import MarkdownReview, ModuleDraft
 from radar.store import Store
 
 
@@ -62,6 +62,8 @@ def test_decompose_deduplicates_documents_and_marks_gaps(markdown_setup):
         response = client.post("/decompose", json=dump(req))
     assert response.status_code == 200
     assert response.json()["status"] == "provisional"
+    assert response.json()["themes"] == [item["title"] for item in response.json()["modules"]]
+    assert all(len(title) <= 24 for title in response.json()["themes"])
     assert len([task for task, _ in model.calls if task == "extract_evidence"]) == 1
     assert any(module["evidence_status"] == "gap" for module in response.json()["modules"])
 
@@ -90,6 +92,22 @@ def test_decompose_uses_family_deduplication_and_stable_module_ids(markdown_setu
         item["module_id"] for item in second["modules"]
     ]
     assert first["structure_version"] == second["structure_version"]
+
+
+def test_decompose_receives_company_context_and_source_policy(markdown_setup):
+    model, store, _, source, history_root, _ = markdown_setup
+    app = create_app(model, store, source.parent, history_root, organization_context={
+        "organization_name": "长鑫存储", "industry": "DRAM",
+        "business_priorities": ["量产成熟度"],
+        "leadership_focus_by_topic_type": {"新技术或能力": ["技术成熟度与量产窗口"]},
+    })
+    with TestClient(app) as client:
+        assert client.post("/decompose", json=dump(sample_decompose_request())).status_code == 200
+    payload = next(payload for task, payload in model.calls if task == "candidate_modules")
+    assert payload["organization_context"]["organization_name"] == "长鑫存储"
+    assert payload["organization_context"]["leadership_focus_by_topic_type"]["新技术或能力"]
+    assert "hard_gate" in payload["source_policy"]
+    assert ModuleDraft.model_json_schema()["properties"]["title"]["maxLength"] == 24
 
 
 def test_markdown_update_creates_versions_and_explainable_change(markdown_setup):
@@ -173,6 +191,7 @@ def test_historical_documents_are_separate_evidence_input(markdown_setup):
     payload = next(payload for task, payload in model.calls if task == "extract_deltas")
     assert [doc["document_id"] for doc in payload["new_documents"]] == ["I_NEW"]
     assert [doc["document_id"] for doc in payload["historical_documents"]] == ["I_HISTORY"]
+    assert payload["source_policy"]["independence_rule"]
 
 
 def test_structure_change_is_preview_only_until_confirmed(markdown_setup):
@@ -344,6 +363,10 @@ def test_repository_config_is_safe_and_complete():
     assert config.app.model_mode == "unconfigured"
     assert config.llm_profiles["default"].api_key == ""
     assert config.reports.root_dir == "reports"
+    assert config.organization.organization_name == "长鑫存储"
+    assert set(config.organization.leadership_focus_by_topic_type) == {
+        "新技术或能力", "行业市场变化", "政策变化", "竞争对象", "经营问题",
+    }
     assert set(config.tasks) == {
         "extract_evidence", "candidate_modules", "review_structure", "resolve_scope",
         "extract_deltas", "plan_update", "review_dependencies", "review_update",

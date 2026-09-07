@@ -25,6 +25,14 @@ class ReportSettings(ConfigModel):
     history_dir: str = "data/report_versions"
 
 
+class OrganizationSettings(ConfigModel):
+    organization_name: str = ""
+    industry: str = ""
+    business_priorities: list[str] = Field(default_factory=list)
+    known_constraints: list[str] = Field(default_factory=list)
+    leadership_focus_by_topic_type: dict[str, list[str]] = Field(default_factory=dict)
+
+
 class LLMProfile(ConfigModel):
     url: str
     model: str
@@ -58,6 +66,7 @@ class TaskSettings(ConfigModel):
 class RadarConfig(ConfigModel):
     app: AppSettings = Field(default_factory=AppSettings)
     reports: ReportSettings = Field(default_factory=ReportSettings)
+    organization: OrganizationSettings = Field(default_factory=OrganizationSettings)
     llm_profiles: dict[str, LLMProfile] = Field(default_factory=dict)
     tasks: dict[str, TaskSettings] = Field(default_factory=dict)
 

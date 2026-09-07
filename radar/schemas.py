@@ -5,6 +5,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 Text = Annotated[str, Field(min_length=1, max_length=12000)]
+ModuleTitle = Annotated[str, Field(min_length=2, max_length=24)]
 Id = Annotated[str, Field(min_length=1, max_length=120, pattern=r"^[\w.:-]+$")]
 ClaimKind = Literal["fact", "assessment", "recommendation", "user_constraint"]
 
@@ -44,7 +45,7 @@ class EvidenceLink(Schema):
 
 
 class ModuleDraft(Schema):
-    title: Text
+    title: ModuleTitle
     core_question: Text
     leadership_value: Text
     scope_in: list[Text] = Field(min_length=1)
@@ -69,9 +70,11 @@ class Module(ModuleDraft):
 
 
 class OrganizationContext(Schema):
+    organization_name: str | None = None
     industry: str | None = None
     business_priorities: list[str] = Field(default_factory=list)
     known_constraints: list[str] = Field(default_factory=list)
+    leadership_focus_by_topic_type: dict[str, list[str]] = Field(default_factory=dict)
 
 
 class ResearchScope(Schema):
@@ -134,6 +137,7 @@ class DecomposeResult(Schema):
     topic_interpretation: str
     selected_lens: str
     assumptions: list[str]
+    themes: list[ModuleTitle] = Field(max_length=8)
     modules: list[Module]
     pending_questions: list[str]
     supplemental_search_requests: list[SearchRequest]
